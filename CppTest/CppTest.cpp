@@ -1,4 +1,7 @@
 
+#include <windows.h>
+#include <psapi.h>
+
 #include <vector>
 #include <string>
 #include <string_view>
@@ -6,43 +9,82 @@
 #include <memory>
 #include <sstream>
 #include <algorithm>
-#include <any>
+#include <charconv>
+#include <variant>
+#include <cctype>
 
 
-enum class ConfigValueTypes
-{
-    UNKNOWN = 0,
-    NOVALUE = 1,
-    INT     = 2,
-    FLOAT   = 3,
-    STRING  = 4
-};
 
 
 class Config;
 class ConfigNode
 {
+    using ConfigValue = std::variant<std::monostate, int, float, std::string, std::string_view>;
+    ConfigValue value;
+
+    // Helper function to check if type T is one of the types in MyVariant
+    template<typename T>
+    void checkTypeInMyVariant() {
+        static_assert(
+            (std::is_same_v<T, std::variant_alternative_t<0, ConfigValue>> 
+                || std::is_same_v<T, std::variant_alternative_t<1, ConfigValue>>     
+                || std::is_same_v<T, std::variant_alternative_t<2, ConfigValue>>     
+                || std::is_same_v<T, std::variant_alternative_t<3, ConfigValue>>
+                || std::is_same_v<T, std::variant_alternative_t<4, ConfigValue>>
+            ),"Provided type T is not one of the types in MyVariant");
+    }
 public:
     std::shared_ptr<ConfigNode> next;
     std::shared_ptr<ConfigNode> child;
+
+    template<typename T>
+    void Set(const T newValue) {
+        checkTypeInMyVariant<T>();
+        child = nullptr;
+        next = nullptr;
+        value = newValue;
+    }
+    
+    template<typename T>
+    bool Get(T& resultValue) {
+        checkTypeInMyVariant<T>();
+    
+        if (!std::holds_alternative<T>(value)) {
+            return false;
+        }
+    
+        resultValue = std::get<T>(value);
+        return true;
+    }
+    
+    template<typename T>
+    bool CheckType() {
+        checkTypeInMyVariant<T>();
+        return std::holds_alternative<T>(value);
+    }
 
     virtual std::string GetKey() = 0;
     Config operator[](const std::string& key);
 };
 
+
 class RamNode : public ConfigNode
 {
     std::string key;
+
 public:
     RamNode(const std::string& key) : key(key) {}
     virtual std::string GetKey() override { return key; }
 };
 
+
+
+
+
 class YamlParser;
 class YamlNode : public ConfigNode
 {
     std::string_view key;
-    std::string_view value; //Temporary
     friend YamlParser;
 
 public:
@@ -59,6 +101,12 @@ public:
     Config(std::shared_ptr<ConfigNode> intern) : intern(intern) {}
     Config operator[](const std::string& key) { return (*intern)[key]; }
     std::string GetKey() { return intern->GetKey(); }
+
+
+    template<typename T>    void Set(const T newValue) { intern->Set<T>(newValue); }
+    template<typename T>    bool Get(T& resultValue) { return intern->Get<T>(resultValue); }
+    template<typename T>    bool CheckType() { return intern->CheckType<T>(); }
+
 
     struct Visitor { 
         int depth = 0;
@@ -157,6 +205,22 @@ class YamlParser
         return line.find_first_not_of(" \t\n\r");
     }
 
+    // Utility function to trim all whitespace characters from both ends of a string view
+    std::string_view trimWhitespace(std::string_view value) {
+        auto isNotWhitespace = [](char ch) {
+            return !std::isspace(static_cast<unsigned char>(ch));
+            };
+
+        // Find the first non-whitespace character from the start
+        auto start = std::find_if(value.begin(), value.end(), isNotWhitespace);
+
+        // Find the last non-whitespace character from the end
+        auto end = std::find_if(value.rbegin(), value.rend(), isNotWhitespace).base();
+
+        // Return a trimmed view from start to end
+        return (start < end) ? std::string_view(&*start, end - start) : std::string_view();
+    }
+
     bool extractKey(const std::string_view& input, const size_t& idx, std::string_view& key)
     {
         std::string_view line;
@@ -199,6 +263,34 @@ class YamlParser
         return true;
     }
 
+    bool parseValue(const std::string_view& rawValue, std::shared_ptr<ConfigNode> node) {
+        // Trim whitespace from the provided value
+        std::string_view value = trimWhitespace(rawValue);
+        
+        if (value.length() == 0)
+            return false;
+        
+        // Try to parse as int
+        int parsedInt;
+        auto intResult = std::from_chars(value.data(), value.data() + value.size(), parsedInt);
+        if (intResult.ec == std::errc{} && intResult.ptr == value.data() + value.size()) {
+            node->Set(parsedInt);
+            return true;
+        }
+        
+        // Try to parse as float
+        float parsedFloat;
+        auto floatResult = std::from_chars(value.data(), value.data() + value.size(), parsedFloat);
+        if (floatResult.ec == std::errc{} && floatResult.ptr == value.data() + value.size()) {
+            node->Set(parsedFloat);
+            return true;
+        }
+        
+        // If parsing attempts fail, set as string_view
+        node->Set(value);
+        return true;
+    }
+
     bool ensureValidLine(const std::string_view& input, size_t& idx)
     {
         while (!checkIfKey(input, idx) && idx < input.length())
@@ -225,9 +317,10 @@ class YamlParser
         std::shared_ptr<YamlNode> node = std::make_shared<YamlNode>(key);
         //node->indentations = indentations;
 
-        if (extractValue(yaml, idx, node->value))
+        std::string_view value;
+        if (extractValue(yaml, idx, value))
         {
-            //TODO we parse the value here!
+            parseValue(value, node);    // TODO: What if this fails?
         }
 
         // Advance to next key
@@ -264,7 +357,33 @@ class YamlParser
         void Visit(Config& node) override
         {
             std::string indentation(depth * 2, ' ');
-            std::cout << indentation << node.GetKey() << ":" << std::endl;
+
+            std::string_view svVal;
+            std::string sVal;
+            int iVal;
+            float fVal;
+            if (node.Get(sVal))
+            {
+                std::cout << indentation << node.GetKey() << ": " << sVal << " (string)" << std::endl;
+            }                                                   
+            else if (node.Get(svVal))                           
+            {                                                   
+                std::cout << indentation << node.GetKey() << ": " << svVal << " (string_view)" << std::endl;
+            }                                                   
+            else if (node.Get(iVal))                            
+            {                                                   
+                std::cout << indentation << node.GetKey() << ": " << iVal << " (int)" << std::endl;
+            }                                                   
+            else if (node.Get(fVal))                            
+            {                                                   
+                std::cout << indentation << node.GetKey() << ": " << fVal << " (float)" << std::endl;
+            }                                                   
+            else                                                
+            {                                                   
+                std::cout << indentation << node.GetKey() << ": " << std::endl;
+            }
+
+            std::cout << indentation << node.GetKey() << ": " << std::endl;
         }
     };
 
@@ -295,31 +414,112 @@ public:
 
 
 const char* cfg = R"(
-DeviceTree:
-    MyFirstDevice:
-        Compatible: MAXUART
-        Baud: 115200
-    SecondDevice:
-        Compatible: Display
-        Uart: MyFirstDevice
+deviceTree:
+  espGpio_0:
+    compatible: EspGpio
+  csLogic_0:
+    compatible: CsLogic
+  spiBus_0:
+    compatible: espSpiBus
+    host: HSPI_HOST
+    dmaChannel: SPI_DMA_CH_AUTO
+    mosi_io_num: GPIO_NUM_4
+    miso_io_num: GPIO_NUM_35
+    sclk_io_num: GPIO_NUM_33
+    max_transfer_sz: 1024
+  spiDevice_0:
+    compatible: espSpiDevice
+    spiBus: spiBus_0
+    clock_speed_hz: 6000000
+    spics_io_num: GPIO_NUM_NC
+    queue_size: 7
+    customCS: csLogic_0,0,4
+  mcp23s17_0:
+    compatible: mcp23s17
+    spiDevice: spiDevice_0
+  spiDevice_1:
+    compatible: espSpiDevice
+    spiBus: spiBus_0
+    clock_speed_hz: 20000000
+    spics_io_num: GPIO_NUM_NC
+    queue_size: 7
+    command_bits: 8
+    customCS: csLogic_0,0,2
+  max14830_0:
+    compatible: max14830
+    spiDevice: spiDevice_1
+    isrPin: espGpio_0,4,7
+  max14830_0_uart_0:
+    compatible: max14830_uart
+    maxDevice: max14830_0
+    port: 0
+  spiDevice_2:
+    compatible: espSpiDevice
+    spiBus: spiBus_0
+    clock_speed_hz: 5000000
+    spics_io_num: GPIO_NUM_NC
+    queue_size: 7
+    command_bits: 8
+    customCS: csLogic_0,0,3
+  pcf2123:
+    compatible: pcf2123, IRtc
+    spiDevice: spiDevice_2
+  kc1Protocol_0:
+    compatible: KC1Protocol, ICommandSource
+    stream: max14830_0_uart_0
+    rxSize: 64
+    txSize: 64
+  pinpadIO_0:
+    compatible: PinpadIO
+    outputRelais_1: max14830_0,0,0
+    outputRelais_2: max14830_0,0,1
+    outputRelais_3: max14830_0,0,2
+    outputBuzzer: max14830_0,3,3
+    inputDetect_1: max14830_0,1,0
+    inputDetect_2: max14830_0,1,1
+    inputDetect_3: max14830_0,1,2
+    inputReset: max14830_0,1,3
+  hd44780_0:
+    compatible: hd44780
+    mcpdevice: mcp23s17_0
+  sntp_0:
+    compatible: ESPNtp, INtp
+    server: pool.ntp.org
+  netIfDevice:
+    compatible: netif
+  lan87xx_0:
+    compatible: lan87xx
+    NetIF: netIfDevice
+    dhcp_enable: 1
+    static_ip: 172.16.10.10
+    static_gw: 172.16.10.10
+    static_dns: 172.16.10.10
+  esp_wifi_0:
+    compatible: esp_wifi
+    NetIF: netIfDevice
+    wifi_mode: WIFI_MODE_STA
+    sta_ssid: default_ssid
+    sta_password: password
+    dhcp_enable: 1
+    static_ip: 172.16.10.11
+    static_gw: 172.16.10.11
+    static_dns: 172.16.10.11
 
 )";
 
-
-
-
+void Test()
+{
+    YamlParser parser;
+    //Create a config from a Yaml.
+    Config config = parser.Parse(cfg);
+    //Print the config as a Yaml to the console.
+    parser.Print(config);
+}
 
 
 int main()
 {
-    YamlParser parser;
-
-    //Create a config from a Yaml.
-    Config config = parser.Parse(cfg);
-
-    //Print the config as a Yaml to the console.
-    parser.Print(config);
-
+    Test();
     std::cout << "\n";
 }
 

@@ -12,160 +12,45 @@
 #include <charconv>
 #include <variant>
 #include <cctype>
+#include <charconv>
+
+#define ESP_LOGE(tag, format, ...) printf("%s: " format "\n", tag, ##__VA_ARGS__)
 
 
 
+enum Result
+{
+    Ok,
+    Error
+};
 
-class Config;
 class ConfigNode
 {
-    using ConfigValue = std::variant<std::monostate, int, float, std::string, std::string_view>;
-    ConfigValue value;
-
-    // Helper function to check if type T is one of the types in MyVariant
-    template<typename T>
-    void checkTypeInMyVariant() {
-        static_assert(
-            (std::is_same_v<T, std::variant_alternative_t<0, ConfigValue>> 
-                || std::is_same_v<T, std::variant_alternative_t<1, ConfigValue>>     
-                || std::is_same_v<T, std::variant_alternative_t<2, ConfigValue>>     
-                || std::is_same_v<T, std::variant_alternative_t<3, ConfigValue>>
-                || std::is_same_v<T, std::variant_alternative_t<4, ConfigValue>>
-            ),"Provided type T is not one of the types in MyVariant");
-    }
+    constexpr static const char* TAG = "ConfigNode";
 public:
-    std::shared_ptr<ConfigNode> next;
-    std::shared_ptr<ConfigNode> child;
+    virtual std::shared_ptr<ConfigNode> GetNext() = 0;
+    virtual std::shared_ptr<ConfigNode> GetChild() = 0;
+    virtual std::string_view GetKey() = 0;
 
-    template<typename T>
-    void Set(const T newValue) {
-        checkTypeInMyVariant<T>();
-        child = nullptr;
-        next = nullptr;
-        value = newValue;
-    }
-    
-    template<typename T>
-    bool Get(T& resultValue) {
-        checkTypeInMyVariant<T>();
-    
-        if (!std::holds_alternative<T>(value)) {
-            return false;
-        }
-    
-        resultValue = std::get<T>(value);
-        return true;
-    }
-    
-    template<typename T>
-    bool CheckType() {
-        checkTypeInMyVariant<T>();
-        return std::holds_alternative<T>(value);
-    }
+    virtual Result Set(const int value)  { ESP_LOGE(TAG, "Not supported"); return Error; }
+    virtual Result Get(int& value) { ESP_LOGE(TAG, "Not supported"); return Error; }
 
-    virtual std::string GetKey() = 0;
-    Config operator[](const std::string& key);
-};
+    virtual Result Set(const float value) { ESP_LOGE(TAG, "Not supported"); return Error; }
+    virtual Result Get(float& value) { ESP_LOGE(TAG, "Not supported"); return Error; }
 
-
-class RamNode : public ConfigNode
-{
-    std::string key;
-
-public:
-    RamNode(const std::string& key) : key(key) {}
-    virtual std::string GetKey() override { return key; }
+    virtual Result Set(const std::string value) { ESP_LOGE(TAG, "Not supported"); return Error; }
+    virtual Result Get(std::string& value) { ESP_LOGE(TAG, "Not supported"); return Error; }
 };
 
 
 
-
-
-class YamlParser;
-class YamlNode : public ConfigNode
-{
-    std::string_view key;
-    friend YamlParser;
-
-public:
-
-    YamlNode(const std::string_view key) : key(key) {}
-    virtual std::string GetKey() override { return std::string(key); }
-};
-
-class Config
-{
-    std::shared_ptr<ConfigNode> intern;
-public:
-    Config(const std::string& key)    {        intern = std::make_shared<RamNode>(key);    }
-    Config(std::shared_ptr<ConfigNode> intern) : intern(intern) {}
-    Config operator[](const std::string& key) { return (*intern)[key]; }
-    std::string GetKey() { return intern->GetKey(); }
-
-
-    template<typename T>    void Set(const T newValue) { intern->Set<T>(newValue); }
-    template<typename T>    bool Get(T& resultValue) { return intern->Get<T>(resultValue); }
-    template<typename T>    bool CheckType() { return intern->CheckType<T>(); }
-
-
-    struct Visitor { 
-        int depth = 0;
-        int width = 0;
-        virtual void Visit(Config& node) = 0; 
-    };
-
-
-    void VisitDepthFirst(Visitor& visitor)
-    {
-        visitor.Visit(*this);
-        if (intern->child) {
-            Config child(intern->child);
-            visitor.depth++;
-            child.VisitDepthFirst(visitor);
-            visitor.depth--;
-        }
-
-        if (intern->next) {
-            Config next(intern->next);
-            visitor.width++;
-            next.VisitDepthFirst(visitor);
-            visitor.width--;
-        }
-    }
-};
-
-
-Config ConfigNode::operator [](const std::string& key) {
-    std::shared_ptr<ConfigNode> iter = child;
-
-    // Loop through the direct children to find an existing key.
-    while (iter) {
-        if (iter->GetKey() == key) {
-            return Config(iter);
-        }
-        iter = iter->next;
-    }
-
-    // No key found, create a new ConfigNode for this key and add it to the children.
-    auto newNode = std::make_shared<RamNode>(key);
-    if (!child) {
-        child = newNode;  // Initialize the child if it's not already initialized.
-    }
-    else {
-        iter = child;
-        while (iter->next) {
-            iter = iter->next;
-        }
-        iter->next = newNode;  // Add the new node to the end of the list of children.
-    }
-
-    return Config(newNode);
-}
 
 class YamlParser
 {
+public:
+
     // Advances idx to beginning of next line, or end of string.
-    void AdvanceLine(const std::string_view& input, size_t& idx)
+    static void AdvanceLine(const std::string_view& input, size_t& idx)
     {
         idx = input.find('\n', idx);
         if (idx == std::string::npos)
@@ -175,7 +60,7 @@ class YamlParser
     }
 
     // Takes a single line, withoug advancing idx.
-    bool getLine(const std::string_view& input, const size_t& idx, std::string_view& line)
+    static bool getLine(const std::string_view& input, const size_t& idx, std::string_view& line)
     {
         size_t end = idx;
         AdvanceLine(input, end);
@@ -186,7 +71,7 @@ class YamlParser
     }
 
     // Checks if line contains valid key
-    bool checkIfKey(const std::string_view& input, const size_t& idx) {
+    static bool checkIfKey(const std::string_view& input, const size_t& idx) {
         std::string_view line;
         if (!getLine(input, idx, line))
             return false;
@@ -196,7 +81,7 @@ class YamlParser
     }
 
     // Returns number of indentations for current node
-    size_t countIndents(const std::string_view& input, const size_t& idx)
+    static size_t countIndents(const std::string_view& input, const size_t& idx)
     {
         std::string_view line;
         if (!getLine(input, idx, line))
@@ -206,7 +91,7 @@ class YamlParser
     }
 
     // Utility function to trim all whitespace characters from both ends of a string view
-    std::string_view trimWhitespace(std::string_view value) {
+    static std::string_view trimWhitespace(std::string_view value) {
         auto isNotWhitespace = [](char ch) {
             return !std::isspace(static_cast<unsigned char>(ch));
             };
@@ -221,7 +106,7 @@ class YamlParser
         return (start < end) ? std::string_view(&*start, end - start) : std::string_view();
     }
 
-    bool extractKey(const std::string_view& input, const size_t& idx, std::string_view& key)
+    static bool extractKey(const std::string_view& input, const size_t& idx, std::string_view& key)
     {
         std::string_view line;
         if (!getLine(input, idx, line))
@@ -243,7 +128,7 @@ class YamlParser
         return true;
     }
 
-    bool extractValue(const std::string_view& input, const size_t& idx, std::string_view& value)
+    static bool extractValue(const std::string_view& input, const size_t& idx, std::string_view& value)
     {
         std::string_view line;
         if (!getLine(input, idx, line))
@@ -260,148 +145,163 @@ class YamlParser
             return false;
 
         value = line.substr(seperator, line.length() - seperator - 1); //Consume \n
-        return true;
-    }
 
-    bool parseValue(const std::string_view& rawValue, std::shared_ptr<ConfigNode> node) {
-        // Trim whitespace from the provided value
-        std::string_view value = trimWhitespace(rawValue);
-        
-        if (value.length() == 0)
+        // Trim leading and trailing whitespaces from the value
+        size_t start = value.find_first_not_of(" \t\n\r");
+        size_t end = value.find_last_not_of(" \t\n\r");
+
+        if (start == std::string::npos || end == std::string::npos)
             return false;
         
-        // Try to parse as int
-        int parsedInt;
-        auto intResult = std::from_chars(value.data(), value.data() + value.size(), parsedInt);
-        if (intResult.ec == std::errc{} && intResult.ptr == value.data() + value.size()) {
-            node->Set(parsedInt);
-            return true;
-        }
-        
-        // Try to parse as float
-        float parsedFloat;
-        auto floatResult = std::from_chars(value.data(), value.data() + value.size(), parsedFloat);
-        if (floatResult.ec == std::errc{} && floatResult.ptr == value.data() + value.size()) {
-            node->Set(parsedFloat);
-            return true;
-        }
-        
-        // If parsing attempts fail, set as string_view
-        node->Set(value);
+        value = value.substr(start, end - start + 1);
+
+        if (value.empty())
+            return false;
+
         return true;
     }
 
-    bool ensureValidLine(const std::string_view& input, size_t& idx)
+    static bool ensureValidLine(const std::string_view& input, size_t& idx)
     {
         while (!checkIfKey(input, idx) && idx < input.length())
             AdvanceLine(input, idx);
         return idx < input.length();
     }
 
-    std::shared_ptr<YamlNode> Parse(const std::string_view& yaml, size_t& idx)
+    static size_t findBegin(const std::string_view& input, const size_t index)
     {
-        // Find begin
-        if (!ensureValidLine(yaml, idx))
-            return nullptr;
+        size_t idx = index;
+        while (!checkIfKey(input, idx) && idx < input.length())
+            AdvanceLine(input, idx);
+        return idx < input.length() ? idx : std::string::npos;
+    }
+};
 
-        // IDX points to the beginning of the line, containing the key of this node.
-        size_t indentations = countIndents(yaml, idx);
+class YamlNode : public ConfigNode
+{
+    const char* yaml;       // Points to the start of the yaml
+    const size_t index;     // Points to the linestart of this node in yaml (or std::string::npos if begin not found)
+public:
+
+    YamlNode(const char* yaml, const size_t index = 0) : yaml(yaml), index(YamlParser::findBegin(yaml, index))
+    {
+    }
+
+    virtual std::string_view GetKey() override
+    {
+        std::string_view key;
+        if (YamlParser::extractKey(yaml, index, key))
+            return key;
+        return "";
+    }
+
+    virtual Result Get(std::string& value) override
+    {
+        std::string_view val;
+        if (!YamlParser::extractValue(yaml, index, val))
+            return Result::Error;
+
+        value = val;
+        return Result::Ok;
+    }
+
+    virtual Result Get(float& value) override
+    {
+        std::string_view val;
+        if (!YamlParser::extractValue(yaml, index, val))
+            return Result::Error;
+
+        char* endPtr = nullptr;
+        value = std::strtof(val.data(), &endPtr);
+
+        // Check if the conversion was successful and the entire string was consumed
+        if (endPtr == val.data() + val.size())
+            return Result::Ok;
+
+        return Result::Error;
+    }
+
+    virtual Result Get(int& value) override
+    {
+        std::string_view val;
+        if (!YamlParser::extractValue(yaml, index, val))
+            return Result::Error;
+
+        char* endPtr = nullptr;
+        value = std::strtol(val.data(), &endPtr, 10);
+
+        // Check if the conversion was successful and the entire string was consumed
+        if (endPtr == val.data() + val.size())
+            return Result::Ok;
+
+        return Result::Error;
+    }
+
+
+    virtual std::shared_ptr<ConfigNode> GetNext() override 
+    {
+        size_t idx = index;
+        size_t indentations = YamlParser::countIndents(yaml, idx);
         if (indentations == std::string::npos)
             return nullptr;
 
-        // Get the key
-        std::string_view key;
-        if (!extractKey(yaml, idx, key))
-            return nullptr;   // Coulnt determine the key
-
-        std::shared_ptr<YamlNode> node = std::make_shared<YamlNode>(key);
-        //node->indentations = indentations;
-
-        std::string_view value;
-        if (extractValue(yaml, idx, value))
+        // Keep advancing lines, untill we find a node with the same indentations
+        size_t yamlLength = strlen(yaml);
+        while (idx < yamlLength)
         {
-            parseValue(value, node);    // TODO: What if this fails?
-        }
-
-        // Advance to next key
-        AdvanceLine(yaml, idx);
-        if (!ensureValidLine(yaml, idx))
-            return node;
-
-        // Check if this is a child
-        size_t ind = countIndents(yaml, idx);
-        if (ind > indentations)
-        {
-            node->child = Parse(yaml, idx); //TODO: Do we want to stop here if retuned nullptr?
-
             // Advance to next key
-            if (!ensureValidLine(yaml, idx))
-                return node;
-        }
+            YamlParser::AdvanceLine(yaml, idx);
+            if (!YamlParser::ensureValidLine(yaml, idx))
+                return nullptr;
 
-        // Check for next node
-        ind = countIndents(yaml, idx);
-        if (ind == indentations)
-        {
-            node->next = Parse(yaml, idx); //TODO: Do we want to stop here if retuned nullptr?
-        }
+            // Get intentation
+            size_t indents = YamlParser::countIndents(yaml, idx);
+            if (indents == std::string::npos)
+                return nullptr;
 
-        return node;
+            // End of this node
+            if (indents < indentations)
+                return nullptr; 
+
+            // Next node found
+            if (indents == indentations)
+                return std::make_shared<YamlNode>(yaml, idx);
+        }
+        return nullptr;
     }
 
-    class YamlPrintVisitor : public Config::Visitor
+    virtual std::shared_ptr<ConfigNode> GetChild() override 
     {
+        size_t idx = index;
+        size_t indentations = YamlParser::countIndents(yaml, idx);
+        if (indentations == std::string::npos)
+            return nullptr;
 
-    public:
-
-        void Visit(Config& node) override
+        // Keep advancing lines, untill we find a node with the same indentations
+        size_t yamlLength = strlen(yaml);
+        while (idx < yamlLength)
         {
-            std::string indentation(depth * 2, ' ');
+            // Advance to next key
+            YamlParser::AdvanceLine(yaml, idx);
+            if (!YamlParser::ensureValidLine(yaml, idx))
+                return nullptr;
 
-            std::string_view svVal;
-            std::string sVal;
-            int iVal;
-            float fVal;
-            if (node.Get(sVal))
-            {
-                std::cout << indentation << node.GetKey() << ": " << sVal << " (string)" << std::endl;
-            }                                                   
-            else if (node.Get(svVal))                           
-            {                                                   
-                std::cout << indentation << node.GetKey() << ": " << svVal << " (string_view)" << std::endl;
-            }                                                   
-            else if (node.Get(iVal))                            
-            {                                                   
-                std::cout << indentation << node.GetKey() << ": " << iVal << " (int)" << std::endl;
-            }                                                   
-            else if (node.Get(fVal))                            
-            {                                                   
-                std::cout << indentation << node.GetKey() << ": " << fVal << " (float)" << std::endl;
-            }                                                   
-            else                                                
-            {                                                   
-                std::cout << indentation << node.GetKey() << ": " << std::endl;
-            }
+            // Get intentation
+            size_t indents = YamlParser::countIndents(yaml, idx);
+            if (indents == std::string::npos)
+                return nullptr;
 
-            std::cout << indentation << node.GetKey() << ": " << std::endl;
+            // End of this node
+            if (indents < indentations)
+                return nullptr;
+
+            // Child node found
+            if (indents > indentations)
+                return std::make_shared<YamlNode>(yaml, idx);
+
+            return nullptr;
         }
-    };
-
-public:
-
-    Config Parse(const std::string_view& yaml)
-    {
-        size_t idx = 0;
-        std::shared_ptr<YamlNode> node = Parse(yaml, idx);
-        if (node == nullptr)
-            return Config("Root");  //TODO: Do we want to handle this differently?
-        return Config(node);
-    }
-
-    void Print(Config& config)
-    {
-        YamlPrintVisitor printVisitor;
-        config.VisitDepthFirst(printVisitor);
+        return nullptr;
     }
 
 };
@@ -410,116 +310,54 @@ public:
 
 
 
-
-
-
 const char* cfg = R"(
-deviceTree:
-  espGpio_0:
-    compatible: EspGpio
-  csLogic_0:
-    compatible: CsLogic
-  spiBus_0:
-    compatible: espSpiBus
-    host: HSPI_HOST
-    dmaChannel: SPI_DMA_CH_AUTO
-    mosi_io_num: GPIO_NUM_4
-    miso_io_num: GPIO_NUM_35
-    sclk_io_num: GPIO_NUM_33
-    max_transfer_sz: 1024
-  spiDevice_0:
-    compatible: espSpiDevice
-    spiBus: spiBus_0
-    clock_speed_hz: 6000000
-    spics_io_num: GPIO_NUM_NC
-    queue_size: 7
-    customCS: csLogic_0,0,4
-  mcp23s17_0:
-    compatible: mcp23s17
-    spiDevice: spiDevice_0
-  spiDevice_1:
-    compatible: espSpiDevice
-    spiBus: spiBus_0
-    clock_speed_hz: 20000000
-    spics_io_num: GPIO_NUM_NC
-    queue_size: 7
-    command_bits: 8
-    customCS: csLogic_0,0,2
-  max14830_0:
-    compatible: max14830
-    spiDevice: spiDevice_1
-    isrPin: espGpio_0,4,7
-  max14830_0_uart_0:
-    compatible: max14830_uart
-    maxDevice: max14830_0
-    port: 0
-  spiDevice_2:
-    compatible: espSpiDevice
-    spiBus: spiBus_0
-    clock_speed_hz: 5000000
-    spics_io_num: GPIO_NUM_NC
-    queue_size: 7
-    command_bits: 8
-    customCS: csLogic_0,0,3
-  pcf2123:
-    compatible: pcf2123, IRtc
-    spiDevice: spiDevice_2
-  kc1Protocol_0:
-    compatible: KC1Protocol, ICommandSource
-    stream: max14830_0_uart_0
-    rxSize: 64
-    txSize: 64
-  pinpadIO_0:
-    compatible: PinpadIO
-    outputRelais_1: max14830_0,0,0
-    outputRelais_2: max14830_0,0,1
-    outputRelais_3: max14830_0,0,2
-    outputBuzzer: max14830_0,3,3
-    inputDetect_1: max14830_0,1,0
-    inputDetect_2: max14830_0,1,1
-    inputDetect_3: max14830_0,1,2
-    inputReset: max14830_0,1,3
-  hd44780_0:
-    compatible: hd44780
-    mcpdevice: mcp23s17_0
-  sntp_0:
-    compatible: ESPNtp, INtp
-    server: pool.ntp.org
-  netIfDevice:
-    compatible: netif
-  lan87xx_0:
-    compatible: lan87xx
-    NetIF: netIfDevice
-    dhcp_enable: 1
-    static_ip: 172.16.10.10
-    static_gw: 172.16.10.10
-    static_dns: 172.16.10.10
-  esp_wifi_0:
-    compatible: esp_wifi
-    NetIF: netIfDevice
-    wifi_mode: WIFI_MODE_STA
-    sta_ssid: default_ssid
-    sta_password: password
-    dhcp_enable: 1
-    static_ip: 172.16.10.11
-    static_gw: 172.16.10.11
-    static_dns: 172.16.10.11
-
+DeviceTree:
+    MyFirstDevice:
+        Compatible: MAXUART
+        Baud: 115200
+        MaxVoltage: 5.7
+    SecondDevice:
+        Compatible: Display
+        Uart: MyFirstDevice
 )";
 
-void Test()
+
+void Print(std::shared_ptr<ConfigNode> node, int depth = 0)
 {
-    YamlParser parser;
-    //Create a config from a Yaml.
-    Config config = parser.Parse(cfg);
-    //Print the config as a Yaml to the console.
-    parser.Print(config);
+    std::string indentation(depth * 2, ' ');
+
+    std::string sValue;
+    int iValue;
+    float fValue;
+
+    if (node->Get(iValue) == Result::Ok)
+        std::cout << indentation << node->GetKey() << ": i " << iValue << std::endl;
+    else if(node->Get(fValue) == Result::Ok)
+        std::cout << indentation << node->GetKey() << ": f " << fValue << std::endl;
+    else if (node->Get(sValue) == Result::Ok)
+        std::cout << indentation << node->GetKey() << ": s " << sValue << std::endl;
+    else
+        std::cout << indentation << node->GetKey() << ": " << std::endl;
+
+    std::shared_ptr<ConfigNode> temp = node->GetChild();
+    if(temp)
+        Print(temp, depth + 1);
+
+    temp = node->GetNext();
+    if (temp)
+        Print(temp, depth);
 }
+
 
 
 int main()
 {
-    Test();
+
+    std::shared_ptr<ConfigNode> node = std::make_shared<YamlNode>(cfg);
+
+    Print(node);
+
+
     std::cout << "\n";
 }
 

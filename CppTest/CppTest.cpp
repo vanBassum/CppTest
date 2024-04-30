@@ -28,22 +28,176 @@ class ConfigNode
 {
     constexpr static const char* TAG = "ConfigNode";
 public:
-    virtual std::shared_ptr<ConfigNode> GetNext() = 0;
-    virtual std::shared_ptr<ConfigNode> GetChild() = 0;
-    virtual std::string_view GetKey() = 0;
+    virtual std::string_view GetKey() const = 0;
+
+    virtual std::shared_ptr<ConfigNode> GetNext() const = 0;
+    virtual std::shared_ptr<ConfigNode> GetChild() const = 0;
+
+    virtual Result SetNext (std::shared_ptr<ConfigNode> node)  { ESP_LOGE(TAG, "Not supported"); return Error; }
+    virtual Result SetChild (std::shared_ptr<ConfigNode> node) { ESP_LOGE(TAG, "Not supported"); return Error; }
 
     virtual Result Set(const int value)  { ESP_LOGE(TAG, "Not supported"); return Error; }
-    virtual Result Get(int& value) { ESP_LOGE(TAG, "Not supported"); return Error; }
+    virtual Result Get(int& value) const { ESP_LOGE(TAG, "Not supported"); return Error; }
 
     virtual Result Set(const float value) { ESP_LOGE(TAG, "Not supported"); return Error; }
-    virtual Result Get(float& value) { ESP_LOGE(TAG, "Not supported"); return Error; }
+    virtual Result Get(float& value) const { ESP_LOGE(TAG, "Not supported"); return Error; }
 
-    virtual Result Set(const std::string value) { ESP_LOGE(TAG, "Not supported"); return Error; }
-    virtual Result Get(std::string& value) { ESP_LOGE(TAG, "Not supported"); return Error; }
+    virtual Result Set(const std::string& value) { ESP_LOGE(TAG, "Not supported"); return Error; }
+    virtual Result Get(std::string& value) const { ESP_LOGE(TAG, "Not supported"); return Error; }    
 };
 
+struct IRamNodeValue
+{
+    enum class Types
+    {
+        NODE,
+        FLOAT,
+        INT,
+        STRING
+    };
+    virtual Types GetType() = 0;
+};
 
+struct RamNodeValue_Node : public IRamNodeValue
+{
+    std::shared_ptr<ConfigNode> child  = nullptr;
+    std::shared_ptr<ConfigNode> next = nullptr;
 
+    RamNodeValue_Node(std::shared_ptr<ConfigNode> child, std::shared_ptr<ConfigNode> next) : child(child), next(next)
+    {
+    }
+
+    virtual Types GetType() override { return Types::NODE; }
+};
+
+struct RamNodeValue_float : public IRamNodeValue
+{
+    float value = 0.0f;
+    RamNodeValue_float(const float value) : value(value)
+    {
+    }
+
+    virtual Types GetType() override { return Types::FLOAT; }
+};
+
+struct RamNodeValue_int : public IRamNodeValue
+{
+    int value = 0;
+    RamNodeValue_int(const int value) : value(value)
+    {
+    }
+    virtual Types GetType() override { return Types::INT; }
+};
+
+struct RamNodeValue_string : public IRamNodeValue
+{
+    std::string value;
+    RamNodeValue_string(const std::string& value) : value(value)
+    {
+    }
+    virtual Types GetType() override { return Types::STRING; }
+};
+
+class RamNode : public ConfigNode
+{
+    std::string key;
+    std::shared_ptr<IRamNodeValue> value = nullptr;
+
+    bool IsType(IRamNodeValue::Types type) const
+    {
+        if (value == nullptr)
+            return false;
+
+        return value->GetType() == type;
+    }
+
+public:
+
+    RamNode(const std::string& key) : key(key)    {    }
+
+    virtual std::string_view GetKey() const override { return key; }
+
+    virtual std::shared_ptr<ConfigNode> GetNext() const override
+    { 
+        if (!IsType(IRamNodeValue::Types::NODE))
+            return nullptr;
+        return std::static_pointer_cast<RamNodeValue_Node>(value)->next;
+    }
+   
+    virtual std::shared_ptr<ConfigNode> GetChild() const override
+    {
+        if (!IsType(IRamNodeValue::Types::NODE))
+            return nullptr;
+        return std::static_pointer_cast<RamNodeValue_Node>(value)->child;
+    }
+
+    virtual Result SetNext(std::shared_ptr<ConfigNode> node)  override
+    { 
+        if (!IsType(IRamNodeValue::Types::NODE))
+            value = std::make_shared<RamNodeValue_Node>(nullptr, nullptr);
+    
+        std::static_pointer_cast<RamNodeValue_Node>(value)->next = node;
+        return Result::Ok;
+    }
+    
+    virtual Result SetChild(std::shared_ptr<ConfigNode> node) override
+    { 
+        if (!IsType(IRamNodeValue::Types::NODE))
+            value = std::make_shared<RamNodeValue_Node>(nullptr, nullptr);
+    
+        std::static_pointer_cast<RamNodeValue_Node>(value)->child = node;
+        return Result::Ok;
+    }
+
+    virtual Result Get(int& val) const override
+    { 
+        if (!IsType(IRamNodeValue::Types::INT))
+            return Result::Error;
+        val = std::static_pointer_cast<RamNodeValue_int>(value)->value;
+        return Result::Ok;
+    }
+
+    virtual Result Get(float& val) const override
+    {
+        if (!IsType(IRamNodeValue::Types::FLOAT))
+            return Result::Error;
+        val = std::static_pointer_cast<RamNodeValue_float>(value)->value;
+        return Result::Ok;
+    }
+
+    virtual Result Get(std::string& val) const override
+    {
+        if (!IsType(IRamNodeValue::Types::STRING))
+            return Result::Error;
+        val = std::static_pointer_cast<RamNodeValue_string>(value)->value;
+        return Result::Ok;
+    }
+
+    virtual Result Set(const int val) override 
+    { 
+        value = std::make_shared<RamNodeValue_int>(val);
+        return Result::Ok;
+    }
+
+    virtual Result Set(const float val) override
+    {
+        value = std::make_shared<RamNodeValue_float>(val);
+        return Result::Ok;
+    }
+
+    virtual Result Set(const std::string& val) override
+    {
+        value = std::make_shared<RamNodeValue_string>(val);
+        return Result::Ok;
+    }
+
+    //virtual Result Set(std::shared_ptr<ConfigNode> node) override
+    //{
+    //    value = std::make_shared<RamNodeValue_Node>(node->GetChild(), node->GetNext());
+    //    key = node->GetKey();
+    //    return Result::Ok;
+    //}
+};
 
 class YamlParser
 {
@@ -187,7 +341,7 @@ public:
     {
     }
 
-    virtual std::string_view GetKey() override
+    virtual std::string_view GetKey() const override
     {
         std::string_view key;
         if (YamlParser::extractKey(yaml, index, key))
@@ -195,7 +349,7 @@ public:
         return "";
     }
 
-    virtual Result Get(std::string& value) override
+    virtual Result Get(std::string& value) const override
     {
         std::string_view val;
         if (!YamlParser::extractValue(yaml, index, val))
@@ -205,7 +359,7 @@ public:
         return Result::Ok;
     }
 
-    virtual Result Get(float& value) override
+    virtual Result Get(float& value) const override
     {
         std::string_view val;
         if (!YamlParser::extractValue(yaml, index, val))
@@ -221,7 +375,7 @@ public:
         return Result::Error;
     }
 
-    virtual Result Get(int& value) override
+    virtual Result Get(int& value) const override
     {
         std::string_view val;
         if (!YamlParser::extractValue(yaml, index, val))
@@ -237,8 +391,7 @@ public:
         return Result::Error;
     }
 
-
-    virtual std::shared_ptr<ConfigNode> GetNext() override 
+    virtual std::shared_ptr<ConfigNode> GetNext() const override
     {
         size_t idx = index;
         size_t indentations = YamlParser::countIndents(yaml, idx);
@@ -270,7 +423,7 @@ public:
         return nullptr;
     }
 
-    virtual std::shared_ptr<ConfigNode> GetChild() override 
+    virtual std::shared_ptr<ConfigNode> GetChild() const override
     {
         size_t idx = index;
         size_t indentations = YamlParser::countIndents(yaml, idx);
@@ -303,7 +456,142 @@ public:
         }
         return nullptr;
     }
+};
 
+
+class Config;
+class IConfigVisitor
+{
+public:
+    virtual void Visit(Config& config, int depth) = 0;
+};
+
+class Config
+{
+    std::shared_ptr<ConfigNode> internalNode;
+
+    Config(std::shared_ptr<ConfigNode> internalNode) : internalNode(internalNode)
+    {
+    }
+
+public:
+
+    Config(const std::string& key)
+    {
+        internalNode = std::make_shared<RamNode>(key);
+    }
+
+    static Config FromYaml(const char* yaml)
+    {
+        std::shared_ptr<ConfigNode> internalNode = std::make_shared<YamlNode>(yaml);
+        return Config(internalNode);
+    }
+
+    Config operator[](const std::string& key) 
+    { 
+        std::shared_ptr<ConfigNode> iterator = internalNode->GetChild();
+        
+        if (iterator == nullptr)
+        {
+            std::shared_ptr<ConfigNode> factory = std::make_shared<RamNode>(key);
+            internalNode->SetChild(factory);
+            return Config(factory);
+        }
+
+        std::shared_ptr<ConfigNode> last;
+        while (iterator)
+        {
+            if (key == iterator->GetKey())
+                return Config(iterator);
+            last = iterator;
+            iterator = iterator->GetNext();
+        }
+
+        last->SetNext(std::make_shared<RamNode>(key));
+        return Config(last);
+    }
+
+    std::string_view GetKey() const                     { return internalNode->GetKey(); }
+    template<typename T> Result Get(T& value) const     { return internalNode->Get(value); }
+
+    template<typename T> Result Set(const T& value)      { return internalNode->Set(value); }
+
+    // template<> Result Set<Config>(const Config& value) { return internalNode->Set(value.internalNode); }
+
+
+    Result AddChildNode(const Config& value)
+    {
+        std::shared_ptr<ConfigNode> iterator = internalNode->GetChild();
+
+        if (iterator == nullptr)
+            return internalNode->SetChild(value.internalNode);  
+
+        std::shared_ptr<ConfigNode> last;
+        while (iterator)
+        {
+            last = iterator;
+            iterator = iterator->GetNext();
+        }
+
+        return last->SetNext(value.internalNode);
+    }
+
+
+
+    void DepthFirstSearch(IConfigVisitor& visitor, int depth = 0)
+    {
+        visitor.Visit(*this, depth);
+        auto childPtr = internalNode->GetChild();
+        if (childPtr)
+        {
+            Config child(childPtr);
+            child.DepthFirstSearch(visitor, depth + 1);
+        }
+
+        auto nextPtr = internalNode->GetNext();
+
+        while (nextPtr)
+        {
+            Config next(nextPtr);
+            next.DepthFirstSearch(visitor, depth);
+            nextPtr = nextPtr->GetNext();
+        }
+    }
+
+    // Result GetNext(Config& result) const                
+    // { 
+    //     auto next = internalNode->GetNext();
+    //     if (!next)
+    //         return Result::Error;
+    //     result = Config(next);
+    //     return Result::Ok;
+    // }
+    // 
+    // 
+    // Result GetChild(Config& result) const               { return Config(internalNode->GetChild()); }
+};
+
+
+class ConfigPrinter : public IConfigVisitor
+{
+public:
+
+    void Visit(Config& node, int depth) override
+    {
+        std::string indentation(depth * 2, ' ');
+        std::string sValue;
+        int iValue;
+        float fValue;
+
+        if (node.Get(iValue) == Result::Ok)
+            std::cout << indentation << node.GetKey() << ": i " << iValue << std::endl;
+        else if (node.Get(fValue) == Result::Ok)
+            std::cout << indentation << node.GetKey() << ": f " << fValue << std::endl;
+        else if (node.Get(sValue) == Result::Ok)
+            std::cout << indentation << node.GetKey() << ": s " << sValue << std::endl;
+        else
+            std::cout << indentation << node.GetKey() << ": " << std::endl;
+    }
 };
 
 
@@ -322,42 +610,23 @@ DeviceTree:
 )";
 
 
-void Print(std::shared_ptr<ConfigNode> node, int depth = 0)
+void Print(Config& node, int depth = 0)
 {
-    std::string indentation(depth * 2, ' ');
-
-    std::string sValue;
-    int iValue;
-    float fValue;
-
-    if (node->Get(iValue) == Result::Ok)
-        std::cout << indentation << node->GetKey() << ": i " << iValue << std::endl;
-    else if(node->Get(fValue) == Result::Ok)
-        std::cout << indentation << node->GetKey() << ": f " << fValue << std::endl;
-    else if (node->Get(sValue) == Result::Ok)
-        std::cout << indentation << node->GetKey() << ": s " << sValue << std::endl;
-    else
-        std::cout << indentation << node->GetKey() << ": " << std::endl;
-
-    std::shared_ptr<ConfigNode> temp = node->GetChild();
-    if(temp)
-        Print(temp, depth + 1);
-
-    temp = node->GetNext();
-    if (temp)
-        Print(temp, depth);
+    ConfigPrinter printer;
+    node.DepthFirstSearch(printer);
 }
 
 
 
 int main()
 {
+    Config root("Root");
 
-    std::shared_ptr<ConfigNode> node = std::make_shared<YamlNode>(cfg);
+    root["testing"]["MyValue"].Set(5);
 
-    Print(node);
+    root.AddChildNode(Config::FromYaml(cfg));
 
-
+    Print(root);
     std::cout << "\n";
 }
 
